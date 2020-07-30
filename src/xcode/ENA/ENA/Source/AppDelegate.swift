@@ -159,66 +159,71 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 }
 
 extension AppDelegate: ENATaskExecutionDelegate {
-
 	/// This method executes the background tasks needed for: a) fetching test results and b) performing exposure detection requests
-	func executeENABackgroundTask(task: BGTask, completion: @escaping ((Bool) -> Void)) {
-		executeFetchTestResults(task: task) { fetchTestResultSuccess in
+	func executeENABackgroundTask(completion: @escaping ((Bool) -> Void)) {
 
-			// NOTE: We are currently fetching the test result first, and then execute
-			// the exposure detection check. Instead of implementing this behaviour in the completion handler,
-			// queues could be used as well. Due to time/resource constraints, we settled for this option.
-			self.executeExposureDetectionRequest(task: task) { exposureDetectionSuccess in
-				completion(fetchTestResultSuccess && exposureDetectionSuccess)
-			}
+		let group = DispatchGroup()
+
+		group.enter()
+		DispatchQueue.global().async {
+			self.executeFetchTestResults { _ in group.leave() }
+		}
+
+		group.enter()
+		DispatchQueue.global().async {
+			self.executeExposureDetectionRequest { _ in group.leave() }
+		}
+
+		group.notify(queue: .main) {
+			completion(true)
 		}
 	}
 
 	/// This method executes a  test result fetch, and if it is successful, and the test result is different from the one that was previously
 	/// part of the app, a local notification is shown.
 	/// NOTE: This method will always return true.
-	private func executeFetchTestResults(task: BGTask, completion: @escaping ((Bool) -> Void)) {
+	private func executeFetchTestResults(completion: @escaping ((Bool) -> Void)) {
 
 		exposureSubmissionService = ENAExposureSubmissionService(diagnosiskeyRetrieval: exposureManager, client: client, store: store)
 
-		if store.registrationToken != nil && store.testResultReceivedTimeStamp == nil {
-			self.exposureSubmissionService?.getTestResult { result in
-				switch result {
-				case .failure(let error):
-					logError(message: error.localizedDescription)
-				case .success(let testResult):
-					if testResult != .pending {
-						UNUserNotificationCenter.current().presentNotification(
-							title: AppStrings.LocalNotifications.testResultsTitle,
-							body: AppStrings.LocalNotifications.testResultsBody,
-							identifier: task.identifier
-						)
-					}
-				}
-
-				completion(true)
-			}
-		} else {
+		guard store.registrationToken != nil && store.testResultReceivedTimeStamp == nil else {
 			completion(true)
+			return
 		}
 
+		self.exposureSubmissionService?.getTestResult { result in
+			switch result {
+			case .failure(let error):
+				logError(message: error.localizedDescription)
+			case .success(let testResult):
+				if testResult != .pending {
+					UNUserNotificationCenter.current().presentNotification(
+						title: AppStrings.LocalNotifications.testResultsTitle,
+						body: AppStrings.LocalNotifications.testResultsBody,
+						identifier: ENATaskIdentifier.exposureNotification.backgroundTaskSchedulerIdentifier + ".test-result"
+					)
+				}
+			}
+
+			completion(true)
+		}
 	}
 
 	/// This method performs a check for the current exposure detection state. Only if the risk level has changed compared to the
 	/// previous state, a local notification is shown.
 	/// NOTE: This method will always return true.
-	private func executeExposureDetectionRequest(task: BGTask, completion: @escaping ((Bool) -> Void)) {
+	private func executeExposureDetectionRequest(completion: @escaping ((Bool) -> Void)) {
 
-		let detectionMode = DetectionMode.fromBackgroundStatus()
-		riskProvider.configuration.detectionMode = detectionMode
+		// At this point we are already in background so it is safe to assume background mode is available.
+		riskProvider.configuration.detectionMode = .fromBackgroundStatus(.available)
 
 		riskProvider.requestRisk(userInitiated: false) { risk in
 			// present a notification if the risk score has increased.
-			if let risk = risk,
-				risk.riskLevelHasChanged {
+			if let risk = risk, risk.riskLevelHasChanged {
 				UNUserNotificationCenter.current().presentNotification(
 					title: AppStrings.LocalNotifications.detectExposureTitle,
-					body: AppStrings.LocalNotifications.detectExposureBody,
-					identifier: task.identifier
+					body:  AppStrings.LocalNotifications.detectExposureBody,
+					identifier: ENATaskIdentifier.exposureNotification.backgroundTaskSchedulerIdentifier + ".risk-detection"
 				)
 			}
 			completion(true)
