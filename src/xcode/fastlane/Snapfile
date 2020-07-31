@@ -7,7 +7,7 @@ devices([
 ])
 
 ios_version(
-  "13.5"
+  "13.6"
 )
 
 languages([
